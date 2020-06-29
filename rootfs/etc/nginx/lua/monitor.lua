@@ -27,12 +27,41 @@ local function send(payload)
   assert(s:close())
 end
 
+-- when the traffic was send to canary service, the canary service name is more appropriate for metrics.
+local function get_service_name(namespace, serviceName, alternativeUpstreamName)
+  local svcName = serviceName
+  -- the variable indicates the traffic if be send to the canary service
+  if namespace and alternativeUpstreamName and #alternativeUpstreamName > #namespace then
+    -- the format of alternativeUpstreamName is `ns-svc-port`
+    local endPos = #alternativeUpstreamName
+    while endPos > 1 do
+      if string.sub(alternativeUpstreamName, endPos, endPos) == "-" then
+        endPos = endPos - 1
+        break
+      end
+      endPos = endPos - 1
+    end
+
+    local startPos = #namespace + 2
+    if string.sub(alternativeUpstreamName, 1, #namespace) ~= namespace then
+      return svcName
+    end
+
+    if startPos <= endPos then
+      svcName = string.sub(alternativeUpstreamName, startPos, endPos)
+    end
+  end
+  return svcName
+end
+
 local function metrics()
+  local serviceName = get_service_name(ngx.var.namespace, ngx.var.service_name, ngx.var.proxy_alternative_upstream_name)
+
   return {
     host = ngx.var.host or "-",
     namespace = ngx.var.namespace or "-",
     ingress = ngx.var.ingress_name or "-",
-    service = ngx.var.service_name or "-",
+    service = serviceName or "-",
     path = ngx.var.location_path or "-",
 
     method = ngx.var.request_method or "-",
@@ -66,7 +95,6 @@ local function flush(premature)
     ngx.log(ngx.ERR, "error while encoding metrics: ", err)
     return
   end
-
   send(payload)
 end
 
@@ -98,6 +126,7 @@ setmetatable(_M, {__index = {
   flush = flush,
   set_metrics_max_batch_size = set_metrics_max_batch_size,
   get_metrics_batch = function() return metrics_batch end,
+  get_service_name = get_service_name,
 }})
 
 return _M
