@@ -20,16 +20,18 @@ import (
 	"github.com/imdario/mergo"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/canary"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/modsecurity"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/proxyssl"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/sslcipher"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	apiv1 "k8s.io/api/core/v1"
-	extensions "k8s.io/api/extensions/v1beta1"
+	networking "k8s.io/api/networking/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/ingress-nginx/internal/ingress/annotations/alias"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/auth"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/authreq"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/authreqglobal"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/authtls"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/backendprotocol"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/clientbodybuffersize"
@@ -37,18 +39,21 @@ import (
 	"k8s.io/ingress-nginx/internal/ingress/annotations/cors"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/customhttperrors"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/defaultbackend"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/fastcgi"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/http2pushpreload"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/influxdb"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/ipwhitelist"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/loadbalancing"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/log"
-	"k8s.io/ingress-nginx/internal/ingress/annotations/luarestywaf"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/mirror"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/opentracing"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/parser"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/portinredirect"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/proxy"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/ratelimit"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/redirect"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/rewrite"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/satisfy"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/secureupstream"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/serversnippet"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/serviceupstream"
@@ -69,7 +74,7 @@ const DeniedKeyName = "Denied"
 type Ingress struct {
 	metav1.ObjectMeta
 	BackendProtocol      string
-	Alias                string
+	Aliases              []string
 	BasicDigestAuth      auth.Config
 	Canary               canary.Config
 	CertificateAuth      authtls.Config
@@ -79,29 +84,35 @@ type Ingress struct {
 	CorsConfig           cors.Config
 	CustomHTTPErrors     []int
 	DefaultBackend       *apiv1.Service
-	Denied               error
-	ExternalAuth         authreq.Config
-	HTTP2PushPreload     bool
-	Proxy                proxy.Config
-	RateLimit            ratelimit.Config
-	Redirect             redirect.Config
-	Rewrite              rewrite.Config
-	SecureUpstream       secureupstream.Config
-	ServerSnippet        string
-	ServiceUpstream      bool
-	SessionAffinity      sessionaffinity.Config
-	SSLPassthrough       bool
-	UsePortInRedirects   bool
-	UpstreamHashBy       upstreamhashby.Config
-	LoadBalancing        string
-	UpstreamVhost        string
-	Whitelist            ipwhitelist.SourceRange
-	XForwardedPrefix     bool
-	SSLCiphers           string
-	Logs                 log.Config
-	LuaRestyWAF          luarestywaf.Config
-	InfluxDB             influxdb.Config
-	ModSecurity          modsecurity.Config
+	//TODO: Change this back into an error when https://github.com/imdario/mergo/issues/100 is resolved
+	FastCGI            fastcgi.Config
+	Denied             *string
+	ExternalAuth       authreq.Config
+	EnableGlobalAuth   bool
+	HTTP2PushPreload   bool
+	Opentracing        opentracing.Config
+	Proxy              proxy.Config
+	ProxySSL           proxyssl.Config
+	RateLimit          ratelimit.Config
+	Redirect           redirect.Config
+	Rewrite            rewrite.Config
+	Satisfy            string
+	SecureUpstream     secureupstream.Config
+	ServerSnippet      string
+	ServiceUpstream    bool
+	SessionAffinity    sessionaffinity.Config
+	SSLPassthrough     bool
+	UsePortInRedirects bool
+	UpstreamHashBy     upstreamhashby.Config
+	LoadBalancing      string
+	UpstreamVhost      string
+	Whitelist          ipwhitelist.SourceRange
+	XForwardedPrefix   string
+	SSLCipher          sslcipher.Config
+	Logs               log.Config
+	InfluxDB           influxdb.Config
+	ModSecurity        modsecurity.Config
+	Mirror             mirror.Config
 }
 
 // Extractor defines the annotation parsers to be used in the extraction of annotations
@@ -113,7 +124,7 @@ type Extractor struct {
 func NewAnnotationExtractor(cfg resolver.Resolver) Extractor {
 	return Extractor{
 		map[string]parser.IngressAnnotation{
-			"Alias":                alias.NewParser(cfg),
+			"Aliases":              alias.NewParser(cfg),
 			"BasicDigestAuth":      auth.NewParser(auth.AuthDirectory, cfg),
 			"Canary":               canary.NewParser(cfg),
 			"CertificateAuth":      authtls.NewParser(cfg),
@@ -123,12 +134,17 @@ func NewAnnotationExtractor(cfg resolver.Resolver) Extractor {
 			"CorsConfig":           cors.NewParser(cfg),
 			"CustomHTTPErrors":     customhttperrors.NewParser(cfg),
 			"DefaultBackend":       defaultbackend.NewParser(cfg),
+			"FastCGI":              fastcgi.NewParser(cfg),
 			"ExternalAuth":         authreq.NewParser(cfg),
+			"EnableGlobalAuth":     authreqglobal.NewParser(cfg),
 			"HTTP2PushPreload":     http2pushpreload.NewParser(cfg),
+			"Opentracing":          opentracing.NewParser(cfg),
 			"Proxy":                proxy.NewParser(cfg),
+			"ProxySSL":             proxyssl.NewParser(cfg),
 			"RateLimit":            ratelimit.NewParser(cfg),
 			"Redirect":             redirect.NewParser(cfg),
 			"Rewrite":              rewrite.NewParser(cfg),
+			"Satisfy":              satisfy.NewParser(cfg),
 			"SecureUpstream":       secureupstream.NewParser(cfg),
 			"ServerSnippet":        serversnippet.NewParser(cfg),
 			"ServiceUpstream":      serviceupstream.NewParser(cfg),
@@ -140,18 +156,18 @@ func NewAnnotationExtractor(cfg resolver.Resolver) Extractor {
 			"UpstreamVhost":        upstreamvhost.NewParser(cfg),
 			"Whitelist":            ipwhitelist.NewParser(cfg),
 			"XForwardedPrefix":     xforwardedprefix.NewParser(cfg),
-			"SSLCiphers":           sslcipher.NewParser(cfg),
+			"SSLCipher":            sslcipher.NewParser(cfg),
 			"Logs":                 log.NewParser(cfg),
-			"LuaRestyWAF":          luarestywaf.NewParser(cfg),
 			"InfluxDB":             influxdb.NewParser(cfg),
 			"BackendProtocol":      backendprotocol.NewParser(cfg),
 			"ModSecurity":          modsecurity.NewParser(cfg),
+			"Mirror":               mirror.NewParser(cfg),
 		},
 	}
 }
 
 // Extract extracts the annotations from an Ingress
-func (e Extractor) Extract(ing *extensions.Ingress) *Ingress {
+func (e Extractor) Extract(ing *networking.Ingress) *Ingress {
 	pia := &Ingress{
 		ObjectMeta: ing.ObjectMeta,
 	}
@@ -159,7 +175,7 @@ func (e Extractor) Extract(ing *extensions.Ingress) *Ingress {
 	data := make(map[string]interface{})
 	for name, annotationParser := range e.annotations {
 		val, err := annotationParser.Parse(ing)
-		klog.V(5).Infof("annotation %v in Ingress %v/%v: %v", name, ing.GetNamespace(), ing.GetName(), val)
+		klog.V(5).InfoS("Parsing Ingress annotation", "name", name, "ingress", klog.KObj(ing), "value", val)
 		if err != nil {
 			if errors.IsMissingAnnotations(err) {
 				continue
@@ -179,12 +195,13 @@ func (e Extractor) Extract(ing *extensions.Ingress) *Ingress {
 
 			_, alreadyDenied := data[DeniedKeyName]
 			if !alreadyDenied {
-				data[DeniedKeyName] = err
-				klog.Errorf("error reading %v annotation in Ingress %v/%v: %v", name, ing.GetNamespace(), ing.GetName(), err)
+				errString := err.Error()
+				data[DeniedKeyName] = &errString
+				klog.ErrorS(err, "error reading Ingress annotation", "name", name, "ingress", klog.KObj(ing))
 				continue
 			}
 
-			klog.V(5).Infof("error reading %v annotation in Ingress %v/%v: %v", name, ing.GetNamespace(), ing.GetName(), err)
+			klog.V(5).ErrorS(err, "error reading Ingress annotation", "name", name, "ingress", klog.KObj(ing))
 		}
 
 		if val != nil {
@@ -194,7 +211,7 @@ func (e Extractor) Extract(ing *extensions.Ingress) *Ingress {
 
 	err := mergo.MapWithOverwrite(pia, data)
 	if err != nil {
-		klog.Errorf("unexpected error merging extracted annotations: %v", err)
+		klog.ErrorS(err, "unexpected error merging extracted annotations")
 	}
 
 	return pia

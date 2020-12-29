@@ -21,27 +21,24 @@ import (
 	"net/http"
 	"strings"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
-	"github.com/parnurzeal/gorequest"
-
+	"github.com/onsi/ginkgo"
 	"k8s.io/ingress-nginx/test/e2e/framework"
 )
 
-var _ = framework.IngressNginxDescribe("Proxy host variable", func() {
+var _ = framework.IngressNginxDescribe("Dynamic $proxy_host", func() {
 	test := "proxy-host"
 	f := framework.NewDefaultFramework(test)
 
-	BeforeEach(func() {
-		f.NewEchoDeploymentWithReplicas(1)
+	ginkgo.BeforeEach(func() {
+		f.NewEchoDeployment()
 	})
 
-	It("should exist a proxy_host", func() {
-		upstreamName := fmt.Sprintf("%v-http-svc-80", f.IngressController.Namespace)
+	ginkgo.It("should exist a proxy_host", func() {
+		upstreamName := fmt.Sprintf("%v-%v-80", f.Namespace, framework.EchoService)
 		annotations := map[string]string{
 			"nginx.ingress.kubernetes.io/configuration-snippet": `more_set_headers "Custom-Header: $proxy_host"`,
 		}
-		f.EnsureIngress(framework.NewSingleIngress(test, "/", test, f.IngressController.Namespace, "http-svc", 80, &annotations))
+		f.EnsureIngress(framework.NewSingleIngress(test, "/", test, f.Namespace, framework.EchoService, 80, annotations))
 
 		f.WaitForNginxConfiguration(
 			func(server string) bool {
@@ -49,24 +46,22 @@ var _ = framework.IngressNginxDescribe("Proxy host variable", func() {
 					strings.Contains(server, "set $proxy_host $proxy_upstream_name")
 			})
 
-		resp, _, errs := gorequest.New().
-			Get(f.IngressController.HTTPURL).
-			Set("Host", test).
-			End()
-
-		Expect(len(errs)).Should(Equal(0))
-		Expect(resp.StatusCode).Should(Equal(http.StatusOK))
-		Expect(resp.Header.Get("Custom-Header")).Should(Equal(upstreamName))
+		f.HTTPTestClient().
+			GET("/").
+			WithHeader("Host", test).
+			Expect().
+			Status(http.StatusOK).
+			Header("Custom-Header").Equal(upstreamName)
 	})
 
-	It("should exist a proxy_host using the upstream-vhost annotation value", func() {
-		upstreamName := fmt.Sprintf("%v-http-svc-80", f.IngressController.Namespace)
+	ginkgo.It("should exist a proxy_host using the upstream-vhost annotation value", func() {
+		upstreamName := fmt.Sprintf("%v-%v-80", f.Namespace, framework.EchoService)
 		upstreamVHost := "different.host"
 		annotations := map[string]string{
 			"nginx.ingress.kubernetes.io/upstream-vhost":        upstreamVHost,
 			"nginx.ingress.kubernetes.io/configuration-snippet": `more_set_headers "Custom-Header: $proxy_host"`,
 		}
-		f.EnsureIngress(framework.NewSingleIngress(test, "/", test, f.IngressController.Namespace, "http-svc", 80, &annotations))
+		f.EnsureIngress(framework.NewSingleIngress(test, "/", test, f.Namespace, framework.EchoService, 80, annotations))
 
 		f.WaitForNginxConfiguration(
 			func(server string) bool {
@@ -74,13 +69,11 @@ var _ = framework.IngressNginxDescribe("Proxy host variable", func() {
 					strings.Contains(server, fmt.Sprintf("set $proxy_host $proxy_upstream_name"))
 			})
 
-		resp, _, errs := gorequest.New().
-			Get(f.IngressController.HTTPURL).
-			Set("Host", test).
-			End()
-
-		Expect(len(errs)).Should(Equal(0))
-		Expect(resp.StatusCode).Should(Equal(http.StatusOK))
-		Expect(resp.Header.Get("Custom-Header")).Should(Equal(upstreamName))
+		f.HTTPTestClient().
+			GET("/").
+			WithHeader("Host", test).
+			Expect().
+			Status(http.StatusOK).
+			Header("Custom-Header").Equal(upstreamName)
 	})
 })

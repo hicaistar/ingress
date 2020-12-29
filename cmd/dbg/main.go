@@ -20,14 +20,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+
 	"github.com/spf13/cobra"
 	"k8s.io/ingress-nginx/internal/nginx"
-	"os"
 )
 
 const (
 	backendsPath = "/configuration/backends"
 	generalPath  = "/configuration/general"
+	certsPath    = "/configuration/certs"
 )
 
 func main() {
@@ -70,6 +72,24 @@ func main() {
 	}
 	backendsCmd.AddCommand(backendsGetCmd)
 
+	certCmd := &cobra.Command{
+		Use:   "certs",
+		Short: "Inspect dynamic SSL certificates",
+	}
+
+	certGetCmd := &cobra.Command{
+		Use:   "get [hostname]",
+		Short: "Get the dynamically-loaded certificate information for the given hostname",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			certGet(args[0])
+			return nil
+		},
+	}
+	certCmd.AddCommand(certGetCmd)
+
+	rootCmd.AddCommand(certCmd)
+
 	generalCmd := &cobra.Command{
 		Use:   "general",
 		Short: "Output the general dynamic lua state",
@@ -102,7 +122,7 @@ func backendsAll() {
 		return
 	}
 	if statusCode != 200 {
-		fmt.Printf("Nginx returned code %v", statusCode)
+		fmt.Printf("Nginx returned code %v\n", statusCode)
 		return
 	}
 
@@ -113,7 +133,7 @@ func backendsAll() {
 		return
 	}
 
-	fmt.Println(string(prettyBuffer.Bytes()))
+	fmt.Println(prettyBuffer.String())
 }
 
 func backendsList() {
@@ -123,7 +143,7 @@ func backendsList() {
 		return
 	}
 	if statusCode != 200 {
-		fmt.Printf("Nginx returned code %v", statusCode)
+		fmt.Printf("Nginx returned code %v\n", statusCode)
 		return
 	}
 
@@ -148,7 +168,7 @@ func backendsGet(name string) {
 		return
 	}
 	if statusCode != 200 {
-		fmt.Printf("Nginx returned code %v", statusCode)
+		fmt.Printf("Nginx returned code %v\n", statusCode)
 		return
 	}
 
@@ -171,25 +191,47 @@ func backendsGet(name string) {
 	fmt.Println("A backend of this name was not found.")
 }
 
-func general() {
-	statusCode, body, requestErr := nginx.NewGetStatusRequest(generalPath)
+func certGet(host string) {
+	statusCode, body, requestErr := nginx.NewGetStatusRequest(certsPath + "?hostname=" + host)
 	if requestErr != nil {
 		fmt.Println(requestErr)
 		return
 	}
-	if statusCode != 200 {
-		fmt.Printf("Nginx returned code %v", statusCode)
+
+	if statusCode == 200 {
+		fmt.Print(string(body))
+		return
+	} else if statusCode != 404 {
+		fmt.Printf("Nginx returned code %v\n", statusCode)
+		fmt.Println(string(body))
 		return
 	}
 
+	fmt.Printf("No cert found for host %v\n", host)
+}
+
+func general() {
+	//TODO: refactor to obtain ingress-nginx pod count from the api server
+	/*
+		statusCode, body, requestErr := nginx.NewGetStatusRequest(generalPath)
+		if requestErr != nil {
+			fmt.Println(requestErr)
+			return
+		}
+		if statusCode != 200 {
+			fmt.Printf("Nginx returned code %v\n", statusCode)
+			return
+		}
+	*/
+
 	var prettyBuffer bytes.Buffer
-	indentErr := json.Indent(&prettyBuffer, body, "", "  ")
+	indentErr := json.Indent(&prettyBuffer, []byte("{}"), "", "  ")
 	if indentErr != nil {
 		fmt.Println(indentErr)
 		return
 	}
 
-	fmt.Println(string(prettyBuffer.Bytes()))
+	fmt.Println(prettyBuffer.String())
 }
 
 func readNginxConf() {

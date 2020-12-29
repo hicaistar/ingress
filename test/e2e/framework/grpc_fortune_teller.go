@@ -17,10 +17,10 @@ limitations under the License.
 package framework
 
 import (
-	. "github.com/onsi/gomega"
-
+	"github.com/onsi/ginkgo"
+	"github.com/stretchr/testify/assert"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	extensions "k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -35,12 +35,12 @@ func (f *Framework) NewGRPCFortuneTellerDeployment() {
 // NewNewGRPCFortuneTellerDeploymentWithReplicas creates a new deployment of the
 // fortune teller image in a particular namespace. Number of replicas is configurable
 func (f *Framework) NewNewGRPCFortuneTellerDeploymentWithReplicas(replicas int32) {
-	deployment := &extensions.Deployment{
+	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "fortune-teller",
-			Namespace: f.IngressController.Namespace,
+			Namespace: f.Namespace,
 		},
-		Spec: extensions.DeploymentSpec{
+		Spec: appsv1.DeploymentSpec{
 			Replicas: NewInt32(replicas),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
@@ -73,19 +73,17 @@ func (f *Framework) NewNewGRPCFortuneTellerDeploymentWithReplicas(replicas int32
 		},
 	}
 
-	d, err := f.EnsureDeployment(deployment)
-	Expect(err).NotTo(HaveOccurred())
-	Expect(d).NotTo(BeNil(), "expected a fortune-teller deployment")
+	d := f.EnsureDeployment(deployment)
 
-	err = WaitForPodsReady(f.KubeClientSet, DefaultTimeout, int(replicas), f.IngressController.Namespace, metav1.ListOptions{
+	err := waitForPodsReady(f.KubeClientSet, DefaultTimeout, int(replicas), f.Namespace, metav1.ListOptions{
 		LabelSelector: fields.SelectorFromSet(fields.Set(d.Spec.Template.ObjectMeta.Labels)).String(),
 	})
-	Expect(err).NotTo(HaveOccurred(), "failed to wait for to become ready")
+	assert.Nil(ginkgo.GinkgoT(), err, "failed to wait for to become ready")
 
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "fortune-teller",
-			Namespace: f.IngressController.Namespace,
+			Namespace: f.Namespace,
 		},
 		Spec: corev1.ServiceSpec{
 			Ports: []corev1.ServicePort{

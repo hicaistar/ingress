@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -34,7 +35,7 @@ const (
 	// FormatHeader name of the header used to extract the format
 	FormatHeader = "X-Format"
 
-	// CodeHeader name of the header used as source of the HTTP statu code to return
+	// CodeHeader name of the header used as source of the HTTP status code to return
 	CodeHeader = "X-Code"
 
 	// ContentType name of the header that defines the format of the reply
@@ -55,10 +56,18 @@ const (
 	// ServicePort name of the header that contains the matched Service port in the Ingress
 	ServicePort = "X-Service-Port"
 
+	// RequestId is a unique ID that identifies the request - same as for backend service
+	RequestId = "X-Request-ID"
+
 	// ErrFilesPathVar is the name of the environment variable indicating
 	// the location on disk of files served by the handler.
 	ErrFilesPathVar = "ERROR_FILES_PATH"
 )
+
+func init() {
+	prometheus.MustRegister(requestCount)
+	prometheus.MustRegister(requestDuration)
+}
 
 func main() {
 	errFilesPath := "/www"
@@ -91,6 +100,7 @@ func errorHandler(path string) func(http.ResponseWriter, *http.Request) {
 			w.Header().Set(IngressName, r.Header.Get(IngressName))
 			w.Header().Set(ServiceName, r.Header.Get(ServiceName))
 			w.Header().Set(ServicePort, r.Header.Get(ServicePort))
+			w.Header().Set(RequestId, r.Header.Get(RequestId))
 		}
 
 		format := r.Header.Get(FormatHeader)
@@ -102,6 +112,7 @@ func errorHandler(path string) func(http.ResponseWriter, *http.Request) {
 		cext, err := mime.ExtensionsByType(format)
 		if err != nil {
 			log.Printf("unexpected error reading media type extension: %v. Using %v", err, ext)
+			format = "text/html"
 		} else if len(cext) == 0 {
 			log.Printf("couldn't get media type extension. Using %v", ext)
 		} else {

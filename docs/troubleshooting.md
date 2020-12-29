@@ -32,7 +32,7 @@ Rules:
             /tea      tea-svc:80 (<none>)
             /coffee   coffee-svc:80 (<none>)
 Annotations:
-  kubectl.kubernetes.io/last-applied-configuration:  {"apiVersion":"extensions/v1beta1","kind":"Ingress","metadata":{"annotations":{},"name":"cafe-ingress","namespace":"default","selfLink":"/apis/extensions/v1beta1/namespaces/default/ingresses/cafe-ingress"},"spec":{"rules":[{"host":"cafe.com","http":{"paths":[{"backend":{"serviceName":"tea-svc","servicePort":80},"path":"/tea"},{"backend":{"serviceName":"coffee-svc","servicePort":80},"path":"/coffee"}]}}]},"status":{"loadBalancer":{"ingress":[{"ip":"169.48.142.110"}]}}}
+  kubectl.kubernetes.io/last-applied-configuration:  {"apiVersion":"networking.k8s.io/v1beta1","kind":"Ingress","metadata":{"annotations":{},"name":"cafe-ingress","namespace":"default","selfLink":"/apis/networking/v1beta1/namespaces/default/ingresses/cafe-ingress"},"spec":{"rules":[{"host":"cafe.com","http":{"paths":[{"backend":{"serviceName":"tea-svc","servicePort":80},"path":"/tea"},{"backend":{"serviceName":"coffee-svc","servicePort":80},"path":"/coffee"}]}}]},"status":{"loadBalancer":{"ingress":[{"ip":"169.48.142.110"}]}}}
 
 Events:
   Type    Reason  Age   From                      Message
@@ -65,12 +65,12 @@ $ kubectl get pods -n <namespace-of-ingress-controller>
 NAME                                        READY     STATUS    RESTARTS   AGE
 nginx-ingress-controller-67956bf89d-fv58j   1/1       Running   0          1m
 
-$ kubectl exec -it -n <namespace-of-ingress-controller> nginx-ingress-controller-67956bf89d-fv58j cat /etc/nginx/nginx.conf
+$ kubectl exec -it -n <namespace-of-ingress-controller> nginx-ingress-controller-67956bf89d-fv58j -- cat /etc/nginx/nginx.conf
 daemon off;
 worker_processes 2;
 pid /run/nginx.pid;
 worker_rlimit_nofile 523264;
-worker_shutdown_timeout 10s;
+worker_shutdown_timeout 240s;
 events {
 	multi_accept        on;
 	worker_connections  16384;
@@ -91,87 +91,6 @@ default       tea-svc                ClusterIP   10.104.172.12    <none>        
 kube-system   default-http-backend   NodePort    10.108.189.236   <none>        80:30001/TCP    30m
 kube-system   kube-dns               ClusterIP   10.96.0.10       <none>        53/UDP,53/TCP   30m
 kube-system   kubernetes-dashboard   NodePort    10.103.128.17    <none>        80:30000/TCP    30m
-```
-
-Use the `/dbg` Tool to Check Dynamic Configuration
-
-```console
-$ kubectl exec -n <namespace-of-ingress-controller> nginx-ingress-controller-67956bf89d-fv58j /dbg
-dbg is a tool for quickly inspecting the state of the nginx instance
-
-Usage:
-  dbg [command]
-
-Available Commands:
-  backends    Inspect the dynamically-loaded backends information
-  conf        Dump the contents of /etc/nginx/nginx.conf
-  general     Output the general dynamic lua state
-  help        Help about any command
-
-Flags:
-  -h, --help   help for dbg
-
-Use "dbg [command] --help" for more information about a command.
-
-```
-
-```console
-$ kubectl exec -n <namespace-of-ingress-controller> nginx-ingress-controller-67956bf89d-fv58j /dbg backends
-Inspect the dynamically-loaded backends information.
-
-Usage:
-  dbg backends [command]
-
-Available Commands:
-  all         Output the all dynamic backend information as a JSON array
-  get         Output the backend information only for the backend that has this name
-  list        Output a newline-separated list of the backend names
-
-Flags:
-  -h, --help   help for backends
-
-Use "dbg backends [command] --help" for more information about a command.
-```
-
-```console
-$ kubectl exec -n <namespace-of-ingress-controller> nginx-ingress-controller-67956bf89d-fv58j /dbg backends list
-coffee-svc-80
-tea-svc-80
-upstream-default-backend
-```
-
-```console
-$ kubectl exec -n <namespace-of-ingress-controller> nginx-ingress-controller-67956bf89d-fv58j /dbg backends get coffee-svc-80
-{
-  "endpoints": [
-    {
-      "address": "10.1.1.112",
-      "port": "8080"
-    },
-    {
-      "address": "10.1.1.119",
-      "port": "8080"
-    },
-    {
-      "address": "10.1.1.121",
-      "port": "8080"
-    }
-  ],
-  "load-balance": "ewma",
-  "name": "coffee-svc-80",
-  "noServer": false,
-  "port": 0,
-  "secureCACert": {
-    "caFilename": "",
-    "pemSha": "",
-    "secret": ""
-  },
-  "service": {
-    "metadata": {
-      "creationTimestamp": null
-    },
-    "spec": {
-....
 ```
 
 ## Debug Logging
@@ -246,7 +165,7 @@ Kubernetes                                                  Workstation
 
 ### Service Account
 
-If using a service account to connect to the API server, Dashboard expects the file
+If using a service account to connect to the API server, the ingress-controller expects the file
 `/var/run/secrets/kubernetes.io/serviceaccount/token` to be present. It provides a secret
 token that is required to authenticate with the API server.
 
@@ -262,7 +181,7 @@ NAME                   READY     STATUS    RESTARTS   AGE
 test-701078429-s5kca   1/1       Running   0          16s
 
 # check if secret exists
-$ kubectl exec test-701078429-s5kca ls /var/run/secrets/kubernetes.io/serviceaccount/
+$ kubectl exec test-701078429-s5kca -- ls /var/run/secrets/kubernetes.io/serviceaccount/
 ca.crt
 namespace
 token
@@ -299,8 +218,8 @@ $ kubectl exec test-701078429-s5kca -- curl --cacert /var/run/secrets/kubernetes
     "/apis/batch/v2alpha1",
     "/apis/certificates.k8s.io",
     "/apis/certificates.k8s.io/v1alpha1",
-    "/apis/extensions",
-    "/apis/extensions/v1beta1",
+    "/apis/networking",
+    "/apis/networking/v1beta1",
     "/apis/policy",
     "/apis/policy/v1alpha1",
     "/apis/rbac.authorization.k8s.io",

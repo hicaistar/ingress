@@ -18,37 +18,48 @@ package template
 
 import (
 	"bytes"
+	"crypto/sha1" // #nosec
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"io/ioutil"
+	"math/rand" // #nosec
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	text_template "text/template"
 	"time"
 
 	"github.com/pkg/errors"
 
+	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/ingress-nginx/internal/file"
+	"k8s.io/klog/v2"
+
 	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/influxdb"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/ratelimit"
 	"k8s.io/ingress-nginx/internal/ingress/controller/config"
 	ing_net "k8s.io/ingress-nginx/internal/net"
-	"k8s.io/klog"
 )
 
 const (
-	slash         = "/"
-	nonIdempotent = "non_idempotent"
-	defBufferSize = 65535
+	slash                      = "/"
+	nonIdempotent              = "non_idempotent"
+	defBufferSize              = 65535
+	defAuthSigninRedirectParam = "rd"
 )
+
+// TemplateWriter is the interface to render a template
+type TemplateWriter interface {
+	Write(conf config.TemplateConfig) ([]byte, error)
+}
 
 // Template ...
 type Template struct {
@@ -59,8 +70,8 @@ type Template struct {
 
 //NewTemplate returns a new Template instance or an
 //error if the specified template file contains errors
-func NewTemplate(file string, fs file.Filesystem) (*Template, error) {
-	data, err := fs.ReadFile(file)
+func NewTemplate(file string) (*Template, error) {
+	data, err := ioutil.ReadFile(file)
 	if err != nil {
 		return nil, errors.Wrapf(err, "unexpected error reading template %v", file)
 	}
@@ -85,12 +96,12 @@ func (t *Template) Write(conf config.TemplateConfig) ([]byte, error) {
 	outCmdBuf := t.bp.Get()
 	defer t.bp.Put(outCmdBuf)
 
-	if klog.V(3) {
+	if klog.V(3).Enabled() {
 		b, err := json.Marshal(conf)
 		if err != nil {
 			klog.Errorf("unexpected error: %v", err)
 		}
-		klog.Infof("NGINX configuration: %v", string(b))
+		klog.InfoS("NGINX", "configuration", string(b))
 	}
 
 	err := t.tmpl.Execute(tmplBuf, conf)
@@ -120,47 +131,59 @@ var (
 			}
 			return true
 		},
-		"escapeLiteralDollar":        escapeLiteralDollar,
-		"shouldConfigureLuaRestyWAF": shouldConfigureLuaRestyWAF,
-		"buildLuaSharedDictionaries": buildLuaSharedDictionaries,
-		"buildLocation":              buildLocation,
-		"buildAuthLocation":          buildAuthLocation,
-		"buildAuthResponseHeaders":   buildAuthResponseHeaders,
-		"buildProxyPass":             buildProxyPass,
-		"filterRateLimits":           filterRateLimits,
-		"buildRateLimitZones":        buildRateLimitZones,
-		"buildRateLimit":             buildRateLimit,
-		"buildResolversForLua":       buildResolversForLua,
-		"buildResolvers":             buildResolvers,
-		"buildUpstreamName":          buildUpstreamName,
-		"isLocationInLocationList":   isLocationInLocationList,
-		"isLocationAllowed":          isLocationAllowed,
-		"buildLogFormatUpstream":     buildLogFormatUpstream,
-		"buildDenyVariable":          buildDenyVariable,
-		"getenv":                     os.Getenv,
-		"contains":                   strings.Contains,
-		"hasPrefix":                  strings.HasPrefix,
-		"hasSuffix":                  strings.HasSuffix,
-		"trimSpace":                  strings.TrimSpace,
-		"toUpper":                    strings.ToUpper,
-		"toLower":                    strings.ToLower,
-		"formatIP":                   formatIP,
-		"buildNextUpstream":          buildNextUpstream,
-		"getIngressInformation":      getIngressInformation,
+		"escapeLiteralDollar":             escapeLiteralDollar,
+		"buildLuaSharedDictionaries":      buildLuaSharedDictionaries,
+		"luaConfigurationRequestBodySize": luaConfigurationRequestBodySize,
+		"buildLocation":                   buildLocation,
+		"buildAuthLocation":               buildAuthLocation,
+		"shouldApplyGlobalAuth":           shouldApplyGlobalAuth,
+		"buildAuthResponseHeaders":        buildAuthResponseHeaders,
+		"buildAuthProxySetHeaders":        buildAuthProxySetHeaders,
+		"buildProxyPass":                  buildProxyPass,
+		"filterRateLimits":                filterRateLimits,
+		"buildRateLimitZones":             buildRateLimitZones,
+		"buildRateLimit":                  buildRateLimit,
+		"configForLua":                    configForLua,
+		"locationConfigForLua":            locationConfigForLua,
+		"buildResolvers":                  buildResolvers,
+		"buildUpstreamName":               buildUpstreamName,
+		"isLocationInLocationList":        isLocationInLocationList,
+		"isLocationAllowed":               isLocationAllowed,
+		"buildDenyVariable":               buildDenyVariable,
+		"getenv":                          os.Getenv,
+		"contains":                        strings.Contains,
+		"hasPrefix":                       strings.HasPrefix,
+		"hasSuffix":                       strings.HasSuffix,
+		"trimSpace":                       strings.TrimSpace,
+		"toUpper":                         strings.ToUpper,
+		"toLower":                         strings.ToLower,
+		"formatIP":                        formatIP,
+		"quote":                           quote,
+		"buildNextUpstream":               buildNextUpstream,
+		"getIngressInformation":           getIngressInformation,
 		"serverConfig": func(all config.TemplateConfig, server *ingress.Server) interface{} {
 			return struct{ First, Second interface{} }{all, server}
 		},
-		"isValidByteSize":              isValidByteSize,
-		"buildForwardedFor":            buildForwardedFor,
-		"buildAuthSignURL":             buildAuthSignURL,
-		"buildOpentracing":             buildOpentracing,
-		"proxySetHeader":               proxySetHeader,
-		"buildInfluxDB":                buildInfluxDB,
-		"enforceRegexModifier":         enforceRegexModifier,
-		"stripLocationModifer":         stripLocationModifer,
-		"buildCustomErrorDeps":         buildCustomErrorDeps,
-		"collectCustomErrorsPerServer": collectCustomErrorsPerServer,
-		"opentracingPropagateContext":  opentracingPropagateContext,
+		"isValidByteSize":                    isValidByteSize,
+		"buildForwardedFor":                  buildForwardedFor,
+		"buildAuthSignURL":                   buildAuthSignURL,
+		"buildAuthSignURLLocation":           buildAuthSignURLLocation,
+		"buildOpentracing":                   buildOpentracing,
+		"proxySetHeader":                     proxySetHeader,
+		"buildInfluxDB":                      buildInfluxDB,
+		"enforceRegexModifier":               enforceRegexModifier,
+		"buildCustomErrorDeps":               buildCustomErrorDeps,
+		"buildCustomErrorLocationsPerServer": buildCustomErrorLocationsPerServer,
+		"shouldLoadModSecurityModule":        shouldLoadModSecurityModule,
+		"buildHTTPListener":                  buildHTTPListener,
+		"buildHTTPSListener":                 buildHTTPSListener,
+		"buildOpentracingForLocation":        buildOpentracingForLocation,
+		"shouldLoadOpentracingModule":        shouldLoadOpentracingModule,
+		"buildModSecurityForLocation":        buildModSecurityForLocation,
+		"buildMirrorLocations":               buildMirrorLocations,
+		"shouldLoadAuthDigestModule":         shouldLoadAuthDigestModule,
+		"shouldLoadInfluxDBModule":           shouldLoadInfluxDBModule,
+		"buildServerName":                    buildServerName,
 	}
 )
 
@@ -192,70 +215,120 @@ func formatIP(input string) string {
 	return fmt.Sprintf("[%s]", input)
 }
 
-func shouldConfigureLuaRestyWAF(disableLuaRestyWAF bool, mode string) bool {
-	if !disableLuaRestyWAF && len(mode) > 0 {
-		return true
+func quote(input interface{}) string {
+	var inputStr string
+	switch input := input.(type) {
+	case string:
+		inputStr = input
+	case fmt.Stringer:
+		inputStr = input.String()
+	case *string:
+		inputStr = *input
+	default:
+		inputStr = fmt.Sprintf("%v", input)
 	}
-
-	return false
+	return fmt.Sprintf("%q", inputStr)
 }
 
-func buildLuaSharedDictionaries(s interface{}, disableLuaRestyWAF bool) string {
-	servers, ok := s.([]*ingress.Server)
+func buildLuaSharedDictionaries(c interface{}, s interface{}) string {
+	var out []string
+
+	cfg, ok := c.(config.Configuration)
+	if !ok {
+		klog.Errorf("expected a 'config.Configuration' type but %T was returned", c)
+		return ""
+	}
+
+	_, ok = s.([]*ingress.Server)
 	if !ok {
 		klog.Errorf("expected an '[]*ingress.Server' type but %T was returned", s)
 		return ""
 	}
 
-	out := []string{
-		"lua_shared_dict configuration_data 5M",
-		"lua_shared_dict certificate_data 16M",
+	for name, size := range cfg.LuaSharedDicts {
+		out = append(out, fmt.Sprintf("lua_shared_dict %s %dM", name, size))
 	}
 
-	if !disableLuaRestyWAF {
-		luaRestyWAFEnabled := func() bool {
-			for _, server := range servers {
-				for _, location := range server.Locations {
-					if len(location.LuaRestyWAF.Mode) > 0 {
-						return true
-					}
-				}
-			}
-			return false
-		}()
-		if luaRestyWAFEnabled {
-			out = append(out, "lua_shared_dict waf_storage 64M")
-		}
-	}
+	sort.Strings(out)
 
-	return strings.Join(out, ";\n\r") + ";"
+	return strings.Join(out, ";\n") + ";\n"
 }
 
-func buildResolversForLua(res interface{}, disableIpv6 interface{}) string {
-	nss, ok := res.([]net.IP)
+func luaConfigurationRequestBodySize(c interface{}) string {
+	cfg, ok := c.(config.Configuration)
 	if !ok {
-		klog.Errorf("expected a '[]net.IP' type but %T was returned", res)
-		return ""
+		klog.Errorf("expected a 'config.Configuration' type but %T was returned", c)
+		return "100" // just a default number
 	}
-	no6, ok := disableIpv6.(bool)
+
+	size := cfg.LuaSharedDicts["configuration_data"]
+	if size < cfg.LuaSharedDicts["certificate_data"] {
+		size = cfg.LuaSharedDicts["certificate_data"]
+	}
+	size = size + 1
+
+	return fmt.Sprintf("%d", size)
+}
+
+// configForLua returns some general configuration as Lua table represented as string
+func configForLua(input interface{}) string {
+	all, ok := input.(config.TemplateConfig)
 	if !ok {
-		klog.Errorf("expected a 'bool' type but %T was returned", disableIpv6)
-		return ""
+		klog.Errorf("expected a 'config.TemplateConfig' type but %T was given", input)
+		return "{}"
 	}
 
-	if len(nss) == 0 {
-		return ""
+	return fmt.Sprintf(`{
+		use_forwarded_headers = %t,
+		use_proxy_protocol = %t,
+		is_ssl_passthrough_enabled = %t,
+		http_redirect_code = %v,
+		listen_ports = { ssl_proxy = "%v", https = "%v" },
+
+		hsts = %t,
+		hsts_max_age = %v,
+		hsts_include_subdomains = %t,
+		hsts_preload = %t,
+	}`,
+		all.Cfg.UseForwardedHeaders,
+		all.Cfg.UseProxyProtocol,
+		all.IsSSLPassthroughEnabled,
+		all.Cfg.HTTPRedirectCode,
+		all.ListenPorts.SSLProxy,
+		all.ListenPorts.HTTPS,
+
+		all.Cfg.HSTS,
+		all.Cfg.HSTSMaxAge,
+		all.Cfg.HSTSIncludeSubdomains,
+		all.Cfg.HSTSPreload,
+	)
+}
+
+// locationConfigForLua formats some location specific configuration into Lua table represented as string
+func locationConfigForLua(l interface{}, a interface{}) string {
+	location, ok := l.(*ingress.Location)
+	if !ok {
+		klog.Errorf("expected an '*ingress.Location' type but %T was given", l)
+		return "{}"
 	}
 
-	r := []string{}
-	for _, ns := range nss {
-		if ing_net.IsIPV6(ns) && no6 {
-			continue
-		}
-		r = append(r, fmt.Sprintf("\"%v\"", ns))
+	all, ok := a.(config.TemplateConfig)
+	if !ok {
+		klog.Errorf("expected a 'config.TemplateConfig' type but %T was given", a)
+		return "{}"
 	}
 
-	return strings.Join(r, ", ")
+	return fmt.Sprintf(`{
+		force_ssl_redirect = %t,
+		ssl_redirect = %t,
+		force_no_ssl_redirect = %t,
+		use_port_in_redirects = %t,
+	}`,
+		location.Rewrite.ForceSSLRedirect,
+		location.Rewrite.SSLRedirect,
+		isLocationInLocationList(l, all.Cfg.NoTLSRedirectLocations),
+		location.UsePortInRedirects,
+	)
 }
 
 // buildResolvers returns the resolvers reading the /etc/resolv.conf file
@@ -303,10 +376,6 @@ func needsRewrite(location *ingress.Location) bool {
 	return false
 }
 
-func stripLocationModifer(path string) string {
-	return strings.TrimLeft(path, "~* ")
-}
-
 // enforceRegexModifier checks if the "rewrite-target" or "use-regex" annotation
 // is used on any location path within a server
 func enforceRegexModifier(input interface{}) bool {
@@ -337,39 +406,60 @@ func buildLocation(input interface{}, enforceRegex bool) string {
 	if enforceRegex {
 		return fmt.Sprintf(`~* "^%s"`, path)
 	}
+
+	if location.PathType != nil && *location.PathType == networkingv1beta1.PathTypeExact {
+		return fmt.Sprintf(`= %s`, path)
+	}
+
 	return path
 }
 
-func buildAuthLocation(input interface{}) string {
+func buildAuthLocation(input interface{}, globalExternalAuthURL string) string {
 	location, ok := input.(*ingress.Location)
 	if !ok {
 		klog.Errorf("expected an '*ingress.Location' type but %T was returned", input)
 		return ""
 	}
 
-	if location.ExternalAuth.URL == "" {
+	if (location.ExternalAuth.URL == "") && (!shouldApplyGlobalAuth(input, globalExternalAuthURL)) {
 		return ""
 	}
 
 	str := base64.URLEncoding.EncodeToString([]byte(location.Path))
 	// removes "=" after encoding
 	str = strings.Replace(str, "=", "", -1)
-	return fmt.Sprintf("/_external-auth-%v", str)
+
+	pathType := "default"
+	if location.PathType != nil {
+		pathType = fmt.Sprintf("%v", *location.PathType)
+	}
+
+	return fmt.Sprintf("/_external-auth-%v-%v", str, pathType)
 }
 
-func buildAuthResponseHeaders(input interface{}) []string {
+// shouldApplyGlobalAuth returns true only in case when ExternalAuth.URL is not set and
+// GlobalExternalAuth is set and enabled
+func shouldApplyGlobalAuth(input interface{}, globalExternalAuthURL string) bool {
 	location, ok := input.(*ingress.Location)
-	res := []string{}
 	if !ok {
 		klog.Errorf("expected an '*ingress.Location' type but %T was returned", input)
+	}
+
+	if (location.ExternalAuth.URL == "") && (globalExternalAuthURL != "") && (location.EnableGlobalAuth) {
+		return true
+	}
+
+	return false
+}
+
+func buildAuthResponseHeaders(headers []string) []string {
+	res := []string{}
+
+	if len(headers) == 0 {
 		return res
 	}
 
-	if len(location.ExternalAuth.ResponseHeaders) == 0 {
-		return res
-	}
-
-	for i, h := range location.ExternalAuth.ResponseHeaders {
+	for i, h := range headers {
 		hvar := strings.ToLower(h)
 		hvar = strings.NewReplacer("-", "_").Replace(hvar)
 		res = append(res, fmt.Sprintf("auth_request_set $authHeader%v $upstream_http_%v;", i, hvar))
@@ -378,14 +468,18 @@ func buildAuthResponseHeaders(input interface{}) []string {
 	return res
 }
 
-func buildLogFormatUpstream(input interface{}) string {
-	cfg, ok := input.(config.Configuration)
-	if !ok {
-		klog.Errorf("expected a 'config.Configuration' type but %T was returned", input)
-		return ""
+func buildAuthProxySetHeaders(headers map[string]string) []string {
+	res := []string{}
+
+	if len(headers) == 0 {
+		return res
 	}
 
-	return cfg.BuildLogFormatUpstream()
+	for name, value := range headers {
+		res = append(res, fmt.Sprintf("proxy_set_header '%v' '%v';", name, value))
+	}
+	sort.Strings(res)
+	return res
 }
 
 // buildProxyPass produces the proxy pass string, if the ingress has redirects
@@ -422,6 +516,9 @@ func buildProxyPass(host string, b interface{}, loc interface{}) string {
 	case "AJP":
 		proto = ""
 		proxyPass = "ajp_pass"
+	case "FCGI":
+		proto = ""
+		proxyPass = "fastcgi_pass"
 	}
 
 	upstreamName := "upstream_balancer"
@@ -440,6 +537,12 @@ func buildProxyPass(host string, b interface{}, loc interface{}) string {
 		}
 	}
 
+	// TODO: add support for custom protocols
+	if location.Backend == "upstream-default-backend" {
+		proto = "http://"
+		proxyPass = "proxy_pass"
+	}
+
 	// defProxyPass returns the default proxy_pass, just the name of the upstream
 	defProxyPass := fmt.Sprintf("%v %s%s;", proxyPass, proto, upstreamName)
 
@@ -451,8 +554,8 @@ func buildProxyPass(host string, b interface{}, loc interface{}) string {
 	if len(location.Rewrite.Target) > 0 {
 		var xForwardedPrefix string
 
-		if location.XForwardedPrefix {
-			xForwardedPrefix = fmt.Sprintf("proxy_set_header X-Forwarded-Prefix \"%s\";\n", path)
+		if len(location.XForwardedPrefix) > 0 {
+			xForwardedPrefix = fmt.Sprintf("proxy_set_header X-Forwarded-Prefix \"%s\";\n", location.XForwardedPrefix)
 		}
 
 		return fmt.Sprintf(`
@@ -464,7 +567,6 @@ rewrite "(?i)%s" %s break;
 	return defProxyPass
 }
 
-// TODO: Needs Unit Tests
 func filterRateLimits(input interface{}) []ratelimit.Config {
 	ratelimits := []ratelimit.Config{}
 	found := sets.String{}
@@ -485,7 +587,6 @@ func filterRateLimits(input interface{}) []ratelimit.Config {
 	return ratelimits
 }
 
-// TODO: Needs Unit Tests
 // buildRateLimitZones produces an array of limit_conn_zone in order to allow
 // rate limiting of request. Each Ingress rule could have up to three zones, one
 // for connection limit by IP address, one for limiting requests per minute, and
@@ -708,8 +809,10 @@ func isValidByteSize(input interface{}, isOffset bool) bool {
 
 type ingressInformation struct {
 	Namespace   string
+	Path        string
 	Rule        string
 	Service     string
+	ServicePort string
 	Annotations map[string]string
 }
 
@@ -723,6 +826,9 @@ func (info *ingressInformation) Equal(other *ingressInformation) bool {
 	if info.Service != other.Service {
 		return false
 	}
+	if info.ServicePort != other.ServicePort {
+		return false
+	}
 	if !reflect.DeepEqual(info.Annotations, other.Annotations) {
 		return false
 	}
@@ -730,14 +836,20 @@ func (info *ingressInformation) Equal(other *ingressInformation) bool {
 	return true
 }
 
-func getIngressInformation(i, p interface{}) *ingressInformation {
+func getIngressInformation(i, h, p interface{}) *ingressInformation {
 	ing, ok := i.(*ingress.Ingress)
 	if !ok {
 		klog.Errorf("expected an '*ingress.Ingress' type but %T was returned", i)
 		return &ingressInformation{}
 	}
 
-	path, ok := p.(string)
+	hostname, ok := h.(string)
+	if !ok {
+		klog.Errorf("expected a 'string' type but %T was returned", h)
+		return &ingressInformation{}
+	}
+
+	ingressPath, ok := p.(string)
 	if !ok {
 		klog.Errorf("expected a 'string' type but %T was returned", p)
 		return &ingressInformation{}
@@ -751,10 +863,19 @@ func getIngressInformation(i, p interface{}) *ingressInformation {
 		Namespace:   ing.GetNamespace(),
 		Rule:        ing.GetName(),
 		Annotations: ing.Annotations,
+		Path:        ingressPath,
+	}
+
+	if ingressPath == "" {
+		ingressPath = "/"
+		info.Path = "/"
 	}
 
 	if ing.Spec.Backend != nil {
 		info.Service = ing.Spec.Backend.ServiceName
+		if ing.Spec.Backend.ServicePort.String() != "0" {
+			info.ServicePort = ing.Spec.Backend.ServicePort.String()
+		}
 	}
 
 	for _, rule := range ing.Spec.Rules {
@@ -762,11 +883,35 @@ func getIngressInformation(i, p interface{}) *ingressInformation {
 			continue
 		}
 
+		if hostname != "_" && rule.Host == "" {
+			continue
+		}
+
+		host := "_"
+		if rule.Host != "" {
+			host = rule.Host
+		}
+
+		if hostname != host {
+			continue
+		}
+
 		for _, rPath := range rule.HTTP.Paths {
-			if path == rPath.Path {
-				info.Service = rPath.Backend.ServiceName
+			if ingressPath != rPath.Path {
+				continue
+			}
+
+			if info.Service != "" && rPath.Backend.ServiceName == "" {
+				// empty rule. Only contains a Path and PathType
 				return info
 			}
+
+			info.Service = rPath.Backend.ServiceName
+			if rPath.Backend.ServicePort.String() != "0" {
+				info.ServicePort = rPath.Backend.ServicePort.String()
+			}
+
+			return info
 		}
 	}
 
@@ -785,24 +930,28 @@ func buildForwardedFor(input interface{}) string {
 	return fmt.Sprintf("$http_%v", ffh)
 }
 
-func buildAuthSignURL(input interface{}) string {
-	s, ok := input.(string)
-	if !ok {
-		klog.Errorf("expected an 'string' type but %T was returned", input)
-		return ""
-	}
-
-	u, _ := url.Parse(s)
+func buildAuthSignURL(authSignURL, authRedirectParam string) string {
+	u, _ := url.Parse(authSignURL)
 	q := u.Query()
+	if authRedirectParam == "" {
+		authRedirectParam = defaultGlobalAuthRedirectParam
+	}
 	if len(q) == 0 {
-		return fmt.Sprintf("%v?rd=$pass_access_scheme://$http_host$escaped_request_uri", s)
+		return fmt.Sprintf("%v?%v=$pass_access_scheme://$http_host$escaped_request_uri", authSignURL, authRedirectParam)
 	}
 
-	if q.Get("rd") != "" {
-		return s
+	if q.Get(authRedirectParam) != "" {
+		return authSignURL
 	}
 
-	return fmt.Sprintf("%v&rd=$pass_access_scheme://$http_host$escaped_request_uri", s)
+	return fmt.Sprintf("%v&%v=$pass_access_scheme://$http_host$escaped_request_uri", authSignURL, authRedirectParam)
+}
+
+func buildAuthSignURLLocation(location, authSignURL string) string {
+	hasher := sha1.New() // #nosec
+	hasher.Write([]byte(location))
+	hasher.Write([]byte(authSignURL))
+	return "@" + hex.EncodeToString(hasher.Sum(nil))
 }
 
 var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -814,33 +963,47 @@ func init() {
 func randomString() string {
 	b := make([]rune, 32)
 	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
+		b[i] = letters[rand.Intn(len(letters))] // #nosec
 	}
 
 	return string(b)
 }
 
-func buildOpentracing(input interface{}) string {
-	cfg, ok := input.(config.Configuration)
+func buildOpentracing(c interface{}, s interface{}) string {
+	cfg, ok := c.(config.Configuration)
 	if !ok {
-		klog.Errorf("expected a 'config.Configuration' type but %T was returned", input)
+		klog.Errorf("expected a 'config.Configuration' type but %T was returned", c)
 		return ""
 	}
 
-	if !cfg.EnableOpentracing {
+	servers, ok := s.([]*ingress.Server)
+	if !ok {
+		klog.Errorf("expected an '[]*ingress.Server' type but %T was returned", s)
+		return ""
+	}
+
+	if !shouldLoadOpentracingModule(cfg, servers) {
 		return ""
 	}
 
 	buf := bytes.NewBufferString("")
-	if cfg.ZipkinCollectorHost != "" {
-		buf.WriteString("opentracing_load_tracer /usr/local/lib/libzipkin_opentracing.so /etc/nginx/opentracing.json;")
+
+	if cfg.DatadogCollectorHost != "" {
+		buf.WriteString("opentracing_load_tracer /usr/local/lib64/libdd_opentracing.so /etc/nginx/opentracing.json;")
+	} else if cfg.ZipkinCollectorHost != "" {
+		buf.WriteString("opentracing_load_tracer /usr/local/lib/libzipkin_opentracing_plugin.so /etc/nginx/opentracing.json;")
 	} else if cfg.JaegerCollectorHost != "" {
 		buf.WriteString("opentracing_load_tracer /usr/local/lib/libjaegertracing_plugin.so /etc/nginx/opentracing.json;")
-	} else if cfg.DatadogCollectorHost != "" {
-		buf.WriteString("opentracing_load_tracer /usr/local/lib/libdd_opentracing.so /etc/nginx/opentracing.json;")
 	}
 
 	buf.WriteString("\r\n")
+
+	if cfg.OpentracingOperationName != "" {
+		buf.WriteString(fmt.Sprintf("opentracing_operation_name \"%s\";\n", cfg.OpentracingOperationName))
+	}
+	if cfg.OpentracingLocationOperationName != "" {
+		buf.WriteString(fmt.Sprintf("opentracing_location_operation_name \"%s\";\n", cfg.OpentracingLocationOperationName))
+	}
 
 	return buf.String()
 }
@@ -884,53 +1047,457 @@ func proxySetHeader(loc interface{}) string {
 
 // buildCustomErrorDeps is a utility function returning a struct wrapper with
 // the data required to build the 'CUSTOM_ERRORS' template
-func buildCustomErrorDeps(proxySetHeaders map[string]string, errorCodes []int, enableMetrics bool) interface{} {
+func buildCustomErrorDeps(upstreamName string, errorCodes []int, enableMetrics bool) interface{} {
 	return struct {
-		ProxySetHeaders map[string]string
-		ErrorCodes      []int
-		EnableMetrics   bool
+		UpstreamName  string
+		ErrorCodes    []int
+		EnableMetrics bool
 	}{
-		ProxySetHeaders: proxySetHeaders,
-		ErrorCodes:      errorCodes,
-		EnableMetrics:   enableMetrics,
+		UpstreamName:  upstreamName,
+		ErrorCodes:    errorCodes,
+		EnableMetrics: enableMetrics,
 	}
 }
 
-// collectCustomErrorsPerServer is a utility function which will collect all
+type errorLocation struct {
+	UpstreamName string
+	Codes        []int
+}
+
+// buildCustomErrorLocationsPerServer is a utility function which will collect all
 // custom error codes for all locations of a server block, deduplicates them,
-// and returns a unique set (for the template to create @custom_xxx locations)
-func collectCustomErrorsPerServer(input interface{}) []int {
+// and returns a set which is unique by default-upstream and error code. It returns an array
+// of errorLocations, each of which contain the upstream name and a list of
+// error codes for that given upstream, so that sufficiently unique
+// @custom error location blocks can be created in the template
+func buildCustomErrorLocationsPerServer(input interface{}) []errorLocation {
 	server, ok := input.(*ingress.Server)
 	if !ok {
 		klog.Errorf("expected a '*ingress.Server' type but %T was returned", input)
 		return nil
 	}
 
-	codesMap := make(map[int]bool)
+	codesMap := make(map[string]map[int]bool)
 	for _, loc := range server.Locations {
-		for _, code := range loc.CustomHTTPErrors {
-			codesMap[code] = true
+		backendUpstream := loc.DefaultBackendUpstreamName
+
+		var dedupedCodes map[int]bool
+		if existingMap, ok := codesMap[backendUpstream]; ok {
+			dedupedCodes = existingMap
+		} else {
+			dedupedCodes = make(map[int]bool)
 		}
+
+		for _, code := range loc.CustomHTTPErrors {
+			dedupedCodes[code] = true
+		}
+		codesMap[backendUpstream] = dedupedCodes
 	}
 
-	uniqueCodes := make([]int, 0, len(codesMap))
-	for key := range codesMap {
-		uniqueCodes = append(uniqueCodes, key)
+	errorLocations := []errorLocation{}
+
+	for upstream, dedupedCodes := range codesMap {
+		codesForUpstream := []int{}
+		for code := range dedupedCodes {
+			codesForUpstream = append(codesForUpstream, code)
+		}
+		sort.Ints(codesForUpstream)
+		errorLocations = append(errorLocations, errorLocation{
+			UpstreamName: upstream,
+			Codes:        codesForUpstream,
+		})
 	}
 
-	return uniqueCodes
+	sort.Slice(errorLocations, func(i, j int) bool {
+		return errorLocations[i].UpstreamName < errorLocations[j].UpstreamName
+	})
+
+	return errorLocations
 }
 
-func opentracingPropagateContext(loc interface{}) string {
-	location, ok := loc.(*ingress.Location)
-	if !ok {
-		klog.Errorf("expected a '*ingress.Location' type but %T was returned", loc)
-		return "opentracing_propagate_context"
+func opentracingPropagateContext(location *ingress.Location) string {
+	if location == nil {
+		return ""
 	}
 
 	if location.BackendProtocol == "GRPC" || location.BackendProtocol == "GRPCS" {
-		return "opentracing_grpc_propagate_context"
+		return "opentracing_grpc_propagate_context;"
 	}
 
-	return "opentracing_propagate_context"
+	return "opentracing_propagate_context;"
+}
+
+// shouldLoadModSecurityModule determines whether or not the ModSecurity module needs to be loaded.
+// First, it checks if `enable-modsecurity` is set in the ConfigMap. If it is not, it iterates over all locations to
+// check if ModSecurity is enabled by the annotation `nginx.ingress.kubernetes.io/enable-modsecurity`.
+func shouldLoadModSecurityModule(c interface{}, s interface{}) bool {
+	cfg, ok := c.(config.Configuration)
+	if !ok {
+		klog.Errorf("expected a 'config.Configuration' type but %T was returned", c)
+		return false
+	}
+
+	servers, ok := s.([]*ingress.Server)
+	if !ok {
+		klog.Errorf("expected an '[]*ingress.Server' type but %T was returned", s)
+		return false
+	}
+
+	// Determine if ModSecurity is enabled globally.
+	if cfg.EnableModsecurity {
+		return true
+	}
+
+	// If ModSecurity is not enabled globally, check if any location has it enabled via annotation.
+	for _, server := range servers {
+		for _, location := range server.Locations {
+			if location.ModSecurity.Enable {
+				return true
+			}
+		}
+	}
+
+	// Not enabled globally nor via annotation on a location, no need to load the module.
+	return false
+}
+
+func buildHTTPListener(t interface{}, s interface{}) string {
+	var out []string
+
+	tc, ok := t.(config.TemplateConfig)
+	if !ok {
+		klog.Errorf("expected a 'config.TemplateConfig' type but %T was returned", t)
+		return ""
+	}
+
+	hostname, ok := s.(string)
+	if !ok {
+		klog.Errorf("expected a 'string' type but %T was returned", s)
+		return ""
+	}
+
+	addrV4 := []string{""}
+	if len(tc.Cfg.BindAddressIpv4) > 0 {
+		addrV4 = tc.Cfg.BindAddressIpv4
+	}
+
+	co := commonListenOptions(tc, hostname)
+
+	out = append(out, httpListener(addrV4, co, tc)...)
+
+	if !tc.IsIPV6Enabled {
+		return strings.Join(out, "\n")
+	}
+
+	addrV6 := []string{"[::]"}
+	if len(tc.Cfg.BindAddressIpv6) > 0 {
+		addrV6 = tc.Cfg.BindAddressIpv6
+	}
+
+	out = append(out, httpListener(addrV6, co, tc)...)
+
+	return strings.Join(out, "\n")
+}
+
+func buildHTTPSListener(t interface{}, s interface{}) string {
+	var out []string
+
+	tc, ok := t.(config.TemplateConfig)
+	if !ok {
+		klog.Errorf("expected a 'config.TemplateConfig' type but %T was returned", t)
+		return ""
+	}
+
+	hostname, ok := s.(string)
+	if !ok {
+		klog.Errorf("expected a 'string' type but %T was returned", s)
+		return ""
+	}
+
+	co := commonListenOptions(tc, hostname)
+
+	addrV4 := []string{""}
+	if len(tc.Cfg.BindAddressIpv4) > 0 {
+		addrV4 = tc.Cfg.BindAddressIpv4
+	}
+
+	out = append(out, httpsListener(addrV4, co, tc)...)
+
+	if !tc.IsIPV6Enabled {
+		return strings.Join(out, "\n")
+	}
+
+	addrV6 := []string{"[::]"}
+	if len(tc.Cfg.BindAddressIpv6) > 0 {
+		addrV6 = tc.Cfg.BindAddressIpv6
+	}
+
+	out = append(out, httpsListener(addrV6, co, tc)...)
+
+	return strings.Join(out, "\n")
+}
+
+func commonListenOptions(template config.TemplateConfig, hostname string) string {
+	var out []string
+
+	if template.Cfg.UseProxyProtocol {
+		out = append(out, "proxy_protocol")
+	}
+
+	if hostname != "_" {
+		return strings.Join(out, " ")
+	}
+
+	// setup options that are valid only once per port
+
+	out = append(out, "default_server")
+
+	if template.Cfg.ReusePort {
+		out = append(out, "reuseport")
+	}
+
+	out = append(out, fmt.Sprintf("backlog=%v", template.BacklogSize))
+
+	return strings.Join(out, " ")
+}
+
+func httpListener(addresses []string, co string, tc config.TemplateConfig) []string {
+	out := make([]string, 0)
+	for _, address := range addresses {
+		lo := []string{"listen"}
+
+		if address == "" {
+			lo = append(lo, fmt.Sprintf("%v", tc.ListenPorts.HTTP))
+		} else {
+			lo = append(lo, fmt.Sprintf("%v:%v", address, tc.ListenPorts.HTTP))
+		}
+
+		lo = append(lo, co)
+		lo = append(lo, ";")
+		out = append(out, strings.Join(lo, " "))
+	}
+
+	return out
+}
+
+func httpsListener(addresses []string, co string, tc config.TemplateConfig) []string {
+	out := make([]string, 0)
+	for _, address := range addresses {
+		lo := []string{"listen"}
+
+		if tc.IsSSLPassthroughEnabled {
+			if address == "" {
+				lo = append(lo, fmt.Sprintf("%v", tc.ListenPorts.SSLProxy))
+			} else {
+				lo = append(lo, fmt.Sprintf("%v:%v", address, tc.ListenPorts.SSLProxy))
+			}
+
+			if !strings.Contains(co, "proxy_protocol") {
+				lo = append(lo, "proxy_protocol")
+			}
+		} else {
+			if address == "" {
+				lo = append(lo, fmt.Sprintf("%v", tc.ListenPorts.HTTPS))
+			} else {
+				lo = append(lo, fmt.Sprintf("%v:%v", address, tc.ListenPorts.HTTPS))
+			}
+		}
+
+		lo = append(lo, co)
+		lo = append(lo, "ssl")
+
+		if tc.Cfg.UseHTTP2 {
+			lo = append(lo, "http2")
+		}
+
+		lo = append(lo, ";")
+		out = append(out, strings.Join(lo, " "))
+	}
+
+	return out
+}
+
+func buildOpentracingForLocation(isOTEnabled bool, location *ingress.Location) string {
+	isOTEnabledInLoc := location.Opentracing.Enabled
+	isOTSetInLoc := location.Opentracing.Set
+
+	if isOTEnabled {
+		if isOTSetInLoc && !isOTEnabledInLoc {
+			return "opentracing off;"
+		}
+
+		opc := opentracingPropagateContext(location)
+		if opc != "" {
+			opc = fmt.Sprintf("opentracing on;\n%v", opc)
+		}
+
+		return opc
+	}
+
+	if isOTSetInLoc && isOTEnabledInLoc {
+		opc := opentracingPropagateContext(location)
+		if opc != "" {
+			opc = fmt.Sprintf("opentracing on;\n%v", opc)
+		}
+
+		return opc
+	}
+
+	return ""
+}
+
+// shouldLoadOpentracingModule determines whether or not the Opentracing module needs to be loaded.
+// First, it checks if `enable-opentracing` is set in the ConfigMap. If it is not, it iterates over all locations to
+// check if Opentracing is enabled by the annotation `nginx.ingress.kubernetes.io/enable-opentracing`.
+func shouldLoadOpentracingModule(c interface{}, s interface{}) bool {
+	cfg, ok := c.(config.Configuration)
+	if !ok {
+		klog.Errorf("expected a 'config.Configuration' type but %T was returned", c)
+		return false
+	}
+
+	servers, ok := s.([]*ingress.Server)
+	if !ok {
+		klog.Errorf("expected an '[]*ingress.Server' type but %T was returned", s)
+		return false
+	}
+
+	if cfg.EnableOpentracing {
+		return true
+	}
+
+	for _, server := range servers {
+		for _, location := range server.Locations {
+			if location.Opentracing.Enabled {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func buildModSecurityForLocation(cfg config.Configuration, location *ingress.Location) string {
+	isMSEnabledInLoc := location.ModSecurity.Enable
+	isMSEnableSetInLoc := location.ModSecurity.EnableSet
+	isMSEnabled := cfg.EnableModsecurity
+
+	if !isMSEnabled && !isMSEnabledInLoc {
+		return ""
+	}
+
+	if isMSEnableSetInLoc && !isMSEnabledInLoc {
+		return "modsecurity off;"
+	}
+
+	var buffer bytes.Buffer
+
+	if !isMSEnabled {
+		buffer.WriteString(`modsecurity on;
+`)
+	}
+
+	if location.ModSecurity.Snippet != "" {
+		buffer.WriteString(fmt.Sprintf(`modsecurity_rules '
+%v
+';
+`, location.ModSecurity.Snippet))
+	}
+
+	if location.ModSecurity.TransactionID != "" {
+		buffer.WriteString(fmt.Sprintf(`modsecurity_transaction_id "%v";
+`, location.ModSecurity.TransactionID))
+	}
+
+	if !isMSEnabled {
+		buffer.WriteString(`modsecurity_rules_file /etc/nginx/modsecurity/modsecurity.conf;
+`)
+	}
+
+	if !cfg.EnableOWASPCoreRules && location.ModSecurity.OWASPRules {
+		buffer.WriteString(`modsecurity_rules_file /etc/nginx/owasp-modsecurity-crs/nginx-modsecurity.conf;
+`)
+	}
+
+	return buffer.String()
+}
+
+func buildMirrorLocations(locs []*ingress.Location) string {
+	var buffer bytes.Buffer
+
+	mapped := sets.String{}
+
+	for _, loc := range locs {
+		if loc.Mirror.Source == "" || loc.Mirror.Target == "" {
+			continue
+		}
+
+		if mapped.Has(loc.Mirror.Source) {
+			continue
+		}
+
+		mapped.Insert(loc.Mirror.Source)
+		buffer.WriteString(fmt.Sprintf(`location = %v {
+internal;
+proxy_pass %v;
+}
+
+`, loc.Mirror.Source, loc.Mirror.Target))
+	}
+
+	return buffer.String()
+}
+
+// shouldLoadAuthDigestModule determines whether or not the ngx_http_auth_digest_module module needs to be loaded.
+func shouldLoadAuthDigestModule(s interface{}) bool {
+	servers, ok := s.([]*ingress.Server)
+	if !ok {
+		klog.Errorf("expected an '[]*ingress.Server' type but %T was returned", s)
+		return false
+	}
+
+	for _, server := range servers {
+		for _, location := range server.Locations {
+			if !location.BasicDigestAuth.Secured {
+				continue
+			}
+
+			if location.BasicDigestAuth.Type == "digest" {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// shouldLoadInfluxDBModule determines whether or not the ngx_http_auth_digest_module module needs to be loaded.
+func shouldLoadInfluxDBModule(s interface{}) bool {
+	servers, ok := s.([]*ingress.Server)
+	if !ok {
+		klog.Errorf("expected an '[]*ingress.Server' type but %T was returned", s)
+		return false
+	}
+
+	for _, server := range servers {
+		for _, location := range server.Locations {
+			if location.InfluxDB.InfluxDBEnabled {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// buildServerName ensures wildcard hostnames are valid
+func buildServerName(hostname string) string {
+	if !strings.HasPrefix(hostname, "*") {
+		return hostname
+	}
+
+	hostname = strings.Replace(hostname, "*.", "", 1)
+	parts := strings.Split(hostname, ".")
+
+	return `~^(?<subdomain>[\w-]+)\.` + strings.Join(parts, "\\.") + `$`
 }

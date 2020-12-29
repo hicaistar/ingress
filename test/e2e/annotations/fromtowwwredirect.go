@@ -20,97 +20,96 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
-	"time"
+	"strings"
 
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
-	"github.com/parnurzeal/gorequest"
+	"github.com/onsi/ginkgo"
+	"github.com/stretchr/testify/assert"
 
 	"k8s.io/ingress-nginx/test/e2e/framework"
 )
 
-var _ = framework.IngressNginxDescribe("Annotations - from-to-www-redirect", func() {
+var _ = framework.DescribeAnnotation("from-to-www-redirect", func() {
 	f := framework.NewDefaultFramework("fromtowwwredirect")
 
-	BeforeEach(func() {
-		f.NewEchoDeploymentWithReplicas(1)
+	ginkgo.BeforeEach(func() {
+		f.NewEchoDeployment()
 	})
 
-	AfterEach(func() {
-	})
-
-	It("should redirect from www HTTP to HTTP", func() {
-		By("setting up server for redirect from www")
+	ginkgo.It("should redirect from www HTTP to HTTP", func() {
+		ginkgo.By("setting up server for redirect from www")
 		host := "fromtowwwredirect.bar.com"
 
 		annotations := map[string]string{
 			"nginx.ingress.kubernetes.io/from-to-www-redirect": "true",
 		}
 
-		ing := framework.NewSingleIngress(host, "/", host, f.IngressController.Namespace, "http-svc", 80, &annotations)
+		ing := framework.NewSingleIngress(host, "/", host, f.Namespace, framework.EchoService, 80, annotations)
 		f.EnsureIngress(ing)
 
 		f.WaitForNginxConfiguration(
 			func(cfg string) bool {
-				return Expect(cfg).Should(ContainSubstring(`server_name www.fromtowwwredirect.bar.com;`)) &&
-					Expect(cfg).Should(ContainSubstring(`return 308 $scheme://fromtowwwredirect.bar.com$request_uri;`))
+				return strings.Contains(cfg, `server_name www.fromtowwwredirect.bar.com;`) &&
+					strings.Contains(cfg, `return 308 $redirect_to;`)
 			})
 
-		By("sending request to www.fromtowwwredirect.bar.com")
-
-		resp, _, errs := gorequest.New().
-			Get(fmt.Sprintf("%s/%s", f.IngressController.HTTPURL, "foo")).
-			Retry(10, 1*time.Second, http.StatusNotFound).
-			RedirectPolicy(noRedirectPolicyFunc).
-			Set("Host", fmt.Sprintf("%s.%s", "www", host)).
-			End()
-
-		Expect(errs).Should(BeEmpty())
-		Expect(resp.StatusCode).Should(Equal(http.StatusPermanentRedirect))
-		Expect(resp.Header.Get("Location")).Should(Equal("http://fromtowwwredirect.bar.com/foo"))
+		ginkgo.By("sending request to www.fromtowwwredirect.bar.com")
+		f.HTTPTestClient().
+			GET("/foo").
+			WithHeader("Host", fmt.Sprintf("%s.%s", "www", host)).
+			Expect().
+			Status(http.StatusPermanentRedirect).
+			Header("Location").Equal("http://fromtowwwredirect.bar.com/foo")
 	})
 
-	It("should redirect from www HTTPS to HTTPS", func() {
-		By("setting up server for redirect from www")
-		host := "fromtowwwredirect.bar.com"
+	ginkgo.It("should redirect from www HTTPS to HTTPS", func() {
+		ginkgo.By("setting up server for redirect from www")
+
+		fromHost := fmt.Sprintf("%s.nip.io", f.GetNginxIP())
+		toHost := fmt.Sprintf("www.%s", fromHost)
 
 		annotations := map[string]string{
-			"nginx.ingress.kubernetes.io/from-to-www-redirect": "true",
+			"nginx.ingress.kubernetes.io/from-to-www-redirect":  "true",
+			"nginx.ingress.kubernetes.io/configuration-snippet": "more_set_headers \"ExpectedHost: $http_host\";",
 		}
 
-		ing := framework.NewSingleIngressWithTLS(host, "/", host, []string{host, fmt.Sprintf("www.%v", host)}, f.IngressController.Namespace, "http-svc", 80, &annotations)
+		ing := framework.NewSingleIngressWithTLS(fromHost, "/", fromHost, []string{fromHost, toHost}, f.Namespace, framework.EchoService, 80, annotations)
 		f.EnsureIngress(ing)
 
 		_, err := framework.CreateIngressTLSSecret(f.KubeClientSet,
 			ing.Spec.TLS[0].Hosts,
 			ing.Spec.TLS[0].SecretName,
 			ing.Namespace)
-		Expect(err).ToNot(HaveOccurred())
+		assert.Nil(ginkgo.GinkgoT(), err)
+		framework.Sleep()
 
-		f.WaitForNginxServer(fmt.Sprintf("www.%v", host),
+		f.WaitForNginxServer(toHost,
 			func(server string) bool {
-				return Expect(server).Should(ContainSubstring(`server_name www.fromtowwwredirect.bar.com;`)) &&
-					Expect(server).Should(ContainSubstring(fmt.Sprintf("/etc/ingress-controller/ssl/%v-fromtowwwredirect.bar.com.pem", f.IngressController.Namespace))) &&
-					Expect(server).Should(ContainSubstring(`return 308 $scheme://fromtowwwredirect.bar.com$request_uri;`))
+				return strings.Contains(server, fmt.Sprintf(`server_name %v;`, toHost)) &&
+					strings.Contains(server, `return 308 $redirect_to;`)
 			})
 
-		By("sending request to www.fromtowwwredirect.bar.com")
+		ginkgo.By("sending request to www should redirect to domain")
+		f.HTTPTestClientWithTLSConfig(&tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         toHost,
+		}).
+			GET("/").
+			WithURL(f.GetURL(framework.HTTPS)).
+			WithHeader("Host", toHost).
+			Expect().
+			Status(http.StatusPermanentRedirect).
+			Header("Location").Equal(fmt.Sprintf("https://%v", fromHost))
 
-		h := fmt.Sprintf("%s.%s", "www", host)
-
-		resp, _, errs := gorequest.New().
-			TLSClientConfig(&tls.Config{
-				InsecureSkipVerify: true,
-				ServerName:         h,
-			}).
-			Get(f.IngressController.HTTPSURL).
-			Retry(10, 1*time.Second, http.StatusNotFound).
-			RedirectPolicy(noRedirectPolicyFunc).
-			Set("host", h).
-			End()
-
-		Expect(errs).Should(BeEmpty())
-		Expect(resp.StatusCode).Should(Equal(http.StatusPermanentRedirect))
-		Expect(resp.Header.Get("Location")).Should(Equal("https://fromtowwwredirect.bar.com/"))
+		ginkgo.By("sending request to domain should not redirect to www")
+		f.HTTPTestClientWithTLSConfig(&tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         fromHost,
+		}).
+			GET("/").
+			WithURL(f.GetURL(framework.HTTPS)).
+			WithHeader("Host", fromHost).
+			Expect().
+			Status(http.StatusOK).
+			Header("ExpectedHost").Equal(fromHost)
 	})
 })

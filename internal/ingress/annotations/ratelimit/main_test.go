@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	api "k8s.io/api/core/v1"
-	extensions "k8s.io/api/extensions/v1beta1"
+	networking "k8s.io/api/networking/v1beta1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -31,28 +31,28 @@ import (
 	"k8s.io/ingress-nginx/internal/ingress/resolver"
 )
 
-func buildIngress() *extensions.Ingress {
-	defaultBackend := extensions.IngressBackend{
+func buildIngress() *networking.Ingress {
+	defaultBackend := networking.IngressBackend{
 		ServiceName: "default-backend",
 		ServicePort: intstr.FromInt(80),
 	}
 
-	return &extensions.Ingress{
+	return &networking.Ingress{
 		ObjectMeta: meta_v1.ObjectMeta{
 			Name:      "foo",
 			Namespace: api.NamespaceDefault,
 		},
-		Spec: extensions.IngressSpec{
-			Backend: &extensions.IngressBackend{
+		Spec: networking.IngressSpec{
+			Backend: &networking.IngressBackend{
 				ServiceName: "default-backend",
 				ServicePort: intstr.FromInt(80),
 			},
-			Rules: []extensions.IngressRule{
+			Rules: []networking.IngressRule{
 				{
 					Host: "foo.bar.com",
-					IngressRuleValue: extensions.IngressRuleValue{
-						HTTP: &extensions.HTTPIngressRuleValue{
-							Paths: []extensions.HTTPIngressPath{
+					IngressRuleValue: networking.IngressRuleValue{
+						HTTP: &networking.HTTPIngressRuleValue{
+							Paths: []networking.HTTPIngressPath{
 								{
 									Path:    "/foo",
 									Backend: defaultBackend,
@@ -134,18 +134,70 @@ func TestRateLimiting(t *testing.T) {
 		t.Errorf("expected a RateLimit type")
 	}
 	if rateLimit.Connections.Limit != 5 {
-		t.Errorf("expected 5 in limit by ip but %v was returend", rateLimit.Connections)
+		t.Errorf("expected 5 in limit by ip but %v was returned", rateLimit.Connections)
+	}
+	if rateLimit.Connections.Burst != 5*5 {
+		t.Errorf("expected %d in burst limit by ip but %v was returned", 5*3, rateLimit.Connections)
 	}
 	if rateLimit.RPS.Limit != 100 {
-		t.Errorf("expected 100 in limit by rps but %v was returend", rateLimit.RPS)
+		t.Errorf("expected 100 in limit by rps but %v was returned", rateLimit.RPS)
+	}
+	if rateLimit.RPS.Burst != 100*5 {
+		t.Errorf("expected %d in burst limit by rps but %v was returned", 100*3, rateLimit.RPS)
 	}
 	if rateLimit.RPM.Limit != 10 {
-		t.Errorf("expected 10 in limit by rpm but %v was returend", rateLimit.RPM)
+		t.Errorf("expected 10 in limit by rpm but %v was returned", rateLimit.RPM)
+	}
+	if rateLimit.RPM.Burst != 10*5 {
+		t.Errorf("expected %d in burst limit by rpm but %v was returned", 10*3, rateLimit.RPM)
 	}
 	if rateLimit.LimitRateAfter != 100 {
-		t.Errorf("expected 100 in limit by limitrateafter but %v was returend", rateLimit.LimitRateAfter)
+		t.Errorf("expected 100 in limit by limitrateafter but %v was returned", rateLimit.LimitRateAfter)
 	}
 	if rateLimit.LimitRate != 10 {
-		t.Errorf("expected 10 in limit by limitrate but %v was returend", rateLimit.LimitRate)
+		t.Errorf("expected 10 in limit by limitrate but %v was returned", rateLimit.LimitRate)
+	}
+
+	data = map[string]string{}
+	data[parser.GetAnnotationWithPrefix("limit-connections")] = "5"
+	data[parser.GetAnnotationWithPrefix("limit-rps")] = "100"
+	data[parser.GetAnnotationWithPrefix("limit-rpm")] = "10"
+	data[parser.GetAnnotationWithPrefix("limit-rate-after")] = "100"
+	data[parser.GetAnnotationWithPrefix("limit-rate")] = "10"
+	data[parser.GetAnnotationWithPrefix("limit-burst-multiplier")] = "3"
+
+	ing.SetAnnotations(data)
+
+	i, err = NewParser(mockBackend{}).Parse(ing)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	rateLimit, ok = i.(*Config)
+	if !ok {
+		t.Errorf("expected a RateLimit type")
+	}
+	if rateLimit.Connections.Limit != 5 {
+		t.Errorf("expected 5 in limit by ip but %v was returned", rateLimit.Connections)
+	}
+	if rateLimit.Connections.Burst != 5*3 {
+		t.Errorf("expected %d in burst limit by ip but %v was returned", 5*3, rateLimit.Connections)
+	}
+	if rateLimit.RPS.Limit != 100 {
+		t.Errorf("expected 100 in limit by rps but %v was returned", rateLimit.RPS)
+	}
+	if rateLimit.RPS.Burst != 100*3 {
+		t.Errorf("expected %d in burst limit by rps but %v was returned", 100*3, rateLimit.RPS)
+	}
+	if rateLimit.RPM.Limit != 10 {
+		t.Errorf("expected 10 in limit by rpm but %v was returned", rateLimit.RPM)
+	}
+	if rateLimit.RPM.Burst != 10*3 {
+		t.Errorf("expected %d in burst limit by rpm but %v was returned", 10*3, rateLimit.RPM)
+	}
+	if rateLimit.LimitRateAfter != 100 {
+		t.Errorf("expected 100 in limit by limitrateafter but %v was returned", rateLimit.LimitRateAfter)
+	}
+	if rateLimit.LimitRate != 10 {
+		t.Errorf("expected 10 in limit by limitrate but %v was returned", rateLimit.LimitRate)
 	}
 }
