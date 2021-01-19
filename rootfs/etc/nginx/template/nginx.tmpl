@@ -886,7 +886,9 @@ stream {
         {{ $server := .Second }}
 
         {{ buildHTTPListener  $all $server.Hostname }}
+        {{ if $server.SSLCert }}
         {{ buildHTTPSListener $all $server.Hostname }}
+        {{ end }}
 
         set $proxy_upstream_name "-";
 
